@@ -139,7 +139,43 @@ jobs:
         run: |
           set -uo pipefail
           echo "Scanning '$SCAN_PATH' (in-scope source is uploaded to Google's CodeMender service)..."
-          cm find "$SCAN_PATH" -y 2>&1 | tee "$RUNNER_TEMP/cm-find.cm.log"
+
+          MAX_RETRIES=10       # Número máximo de reintentos
+          RETRY_COUNT=0
+          DELAY=15            # Tiempo de espera inicial en segundos
+          MAX_DELAY=300       # Tiempo máximo de espera (5 minutos)
+
+          while true; do
+            echo "--- Intento $((RETRY_COUNT + 1)) ---"
+
+            # Ejecutamos el comando guardando la salida
+            if cm find "$SCAN_PATH" -y 2>&1 | tee "$RUNNER_TEMP/cm-find.cm.log"; then
+              # Verificamos si en el log hay errores de cuotas (por si cm exita con 0)
+              if grep -qiE "RESOURCE_EXHAUSTED|Quota exceeded|429|rate limit" "$RUNNER_TEMP/cm-find.cm.log"; then
+                echo "⚠️ Se detectó un problema de cuotas/rate limit en la salida."
+              else
+                echo "✅ Escaneo completado con éxito."
+                break
+              fi
+            else
+              echo "⚠️ El comando cm find falló."
+            fi
+
+            RETRY_COUNT=$((RETRY_COUNT + 1))
+            if [ $RETRY_COUNT -ge $MAX_RETRIES ]; then
+              echo "❌ Se alcanzó el número máximo de reintentos ($MAX_RETRIES). Abortando."
+              exit 1
+            fi
+
+            echo "⏳ Esperando ${DELAY}s antes de reintentar (exponential backoff)..."
+            sleep $DELAY
+
+            # Duplicamos la espera para el siguiente intento (backoff exponencial)
+            DELAY=$((DELAY * 2))
+            if [ $DELAY -gt $MAX_DELAY ]; then
+              DELAY=$MAX_DELAY
+            fi
+          done
 
       - name: Export Security Report (cm report -f json)
         if: ${{ always() && steps.scan.conclusion != 'skipped' }}
